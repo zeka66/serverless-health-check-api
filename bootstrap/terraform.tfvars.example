@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars and fill in before running the bootstrap.
+
+aws_region          = "eu-north-1"
+state_bucket_name   = "health-check-api-tfstate-000000000000"
+github_repository   = "OWNER/REPO"
+allowed_account_ids = ["000000000000"]
