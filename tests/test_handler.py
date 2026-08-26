@@ -5,16 +5,12 @@ import importlib
 import json
 import os
 import sys
-
 import boto3
 import pytest
 from moto import mock_aws
 
 TABLE_NAME = "test-requests-db"
 REGION = "eu-north-1"
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 
 @pytest.fixture()
 def handler_module():
