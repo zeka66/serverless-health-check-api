@@ -8,7 +8,7 @@ allowed_account_ids = ["101528376191"]
 # Sizing: more headroom and longer retention than staging.
 lambda_memory_mb            = 512
 lambda_timeout_seconds      = 15
-lambda_reserved_concurrency = 20
+lambda_reserved_concurrency = -1
 log_retention_days          = 90
 item_ttl_days               = 90
 

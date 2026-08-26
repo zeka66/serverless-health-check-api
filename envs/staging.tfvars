@@ -10,7 +10,7 @@ allowed_account_ids = ["101528376191"]
 # Sizing: staging is deliberately small and cheap.
 lambda_memory_mb            = 256
 lambda_timeout_seconds      = 10
-lambda_reserved_concurrency = 5
+lambda_reserved_concurrency = -1
 log_retention_days          = 14
 item_ttl_days               = 7
 

@@ -55,9 +55,9 @@ variable "lambda_timeout_seconds" {
 }
 
 variable "lambda_reserved_concurrency" {
-  description = "Reserved concurrent executions. Caps blast radius and spend."
+  description = "Reserved concurrent executions. -1 disables reservation, required on accounts with a low concurrency quota."
   type        = number
-  default     = 5
+  default     = -1
 }
 
 variable "log_retention_days" {
