@@ -1,0 +1,241 @@
+name: Deploy
+
+# Pull requests get validation, scanning and a plan, but never an apply.
+# Pushes to main deploy staging, then prod.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege at the workflow level. id-token is what allows the OIDC
+# exchange with AWS; no long-lived AWS credentials exist in this repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.15.9"
+  PYTHON_VERSION: "3.12"
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
+jobs:
+  # ---------------------------------------------------------------------
+  # [sec] IaC Security + dependency scanning. This job is issued NO AWS
+  # credentials at all, so a pull request from a fork has nothing to steal.
+  # Every deploy job declares `needs: validate`, which makes this a hard
+  # gate before any terraform apply.
+  # ---------------------------------------------------------------------
+  validate:
+    name: Validate and scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform format check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform validate
+        # -backend=false validates syntax and wiring without needing
+        # credentials or reaching out to S3.
+        run: |
+          terraform init -backend=false
+          terraform validate
+          cd bootstrap && terraform init -backend=false && terraform validate
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tests/requirements-dev.txt
+          pip install pip-audit checkov
+
+      - name: Lambda unit tests
+        run: pytest tests/ -v
+
+      # [sec] Dependency scanning for the Lambda.
+      - name: Dependency scan (pip-audit)
+        run: pip-audit --requirement src/requirements.txt --strict --progress-spinner off
+
+      # [sec] IaC security scan. Exits non-zero on any finding.
+      - name: IaC security scan (Checkov)
+        run: |
+          checkov --directory . \
+                  --skip-download \
+                  --config-file .checkov.yaml \
+                  --output cli \
+                  --output sarif \
+                  --output-file-path console,checkov.sarif
+
+      - name: Upload scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-sarif
+          path: checkov.sarif
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------
+  # Plan on pull requests, so reviewers see the diff before merge.
+  # ---------------------------------------------------------------------
+  plan:
+    name: Plan (staging)
+    if: github.event_name == 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN_STAGING }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-plan-staging-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform plan
+        run: |
+          terraform init -backend-config=envs/staging.backend.hcl
+          terraform plan -var-file=envs/staging.tfvars -no-color | tee plan.txt
+
+      - name: Comment plan on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('plan.txt', 'utf8');
+            const truncated = plan.length > 60000
+              ? plan.slice(0, 60000) + '\n\n...output truncated...'
+              : plan;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '### Terraform plan (staging)\n```hcl\n' + truncated + '\n```'
+            });
+
+  # ---------------------------------------------------------------------
+  # Staging deploys automatically once main is green.
+  # ---------------------------------------------------------------------
+  deploy-staging:
+    name: Deploy staging
+    if: github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: ${{ steps.outputs.outputs.endpoint }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # The role's trust policy is scoped to this repo AND the staging
+          # environment, so this job physically cannot assume the prod role.
+          role-to-assume: ${{ vars.AWS_ROLE_ARN_STAGING }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-deploy-staging-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform apply
+        run: |
+          terraform init -backend-config=envs/staging.backend.hcl
+          terraform plan -var-file=envs/staging.tfvars -out=tfplan
+          terraform apply -auto-approve tfplan
+
+      - name: Capture outputs
+        id: outputs
+        run: echo "endpoint=$(terraform output -raw health_endpoint)" >> "$GITHUB_OUTPUT"
+
+      # Post-deploy verification: proves the endpoint works and that input
+      # validation rejects a bad request, before prod is attempted.
+      - name: Smoke test
+        run: |
+          ENDPOINT=$(terraform output -raw health_endpoint)
+
+          echo "Expecting 200 for a valid request..."
+          code=$(curl -s -o /tmp/ok.json -w '%{http_code}' -X POST "$ENDPOINT" \
+            -H 'content-type: application/json' \
+            -d '{"payload":{"source":"ci-smoke-test","run":"'"$GITHUB_RUN_ID"'"}}')
+          echo "  -> $code $(cat /tmp/ok.json)"
+          [ "$code" = "200" ] || { echo "Smoke test failed"; exit 1; }
+
+          echo "Expecting 400 for a request with no payload key..."
+          code=$(curl -s -o /tmp/bad.json -w '%{http_code}' -X POST "$ENDPOINT" \
+            -H 'content-type: application/json' -d '{}')
+          echo "  -> $code $(cat /tmp/bad.json)"
+          [ "$code" = "400" ] || { echo "Validation test failed"; exit 1; }
+
+  # ---------------------------------------------------------------------
+  # Prod deploys only after staging has deployed and smoke-tested cleanly.
+  # ---------------------------------------------------------------------
+  deploy-prod:
+    name: Deploy prod
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment:
+      name: prod
+      url: ${{ steps.outputs.outputs.endpoint }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-deploy-prod-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform apply
+        run: |
+          terraform init -backend-config=envs/prod.backend.hcl
+          terraform plan -var-file=envs/prod.tfvars -out=tfplan
+          terraform apply -auto-approve tfplan
+
+      - name: Capture outputs
+        id: outputs
+        run: echo "endpoint=$(terraform output -raw health_endpoint)" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test
+        run: |
+          ENDPOINT=$(terraform output -raw health_endpoint)
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT" \
+            -H 'content-type: application/json' \
+            -d '{"payload":{"source":"ci-smoke-test"}}')
+          [ "$code" = "200" ] || { echo "Prod smoke test failed with $code"; exit 1; }
