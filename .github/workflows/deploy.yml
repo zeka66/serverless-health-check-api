@@ -86,21 +86,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Debug OIDC claims
-        env:
-          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+      - name: Debug OIDC claim
         run: |
-          response=$(curl -sSf \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com")
-
-          token=$(echo "$response" | jq -r '.value')
-
-          echo "$token" |
-            cut -d '.' -f2 |
-            base64 -d 2>/dev/null |
-            jq '{sub, aud}'
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
+          echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '{sub, aud}'
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
