@@ -94,6 +94,7 @@ data "aws_iam_policy_document" "deploy" {
       "lambda:PutFunctionConcurrency",
       "lambda:DeleteFunctionConcurrency",
       "lambda:ListTags",
+      "lambda:ListVersionsByFunction",
     ]
 
     resources = ["arn:aws:lambda:${local.region}:${local.account_id}:function:${each.value}-*"]
