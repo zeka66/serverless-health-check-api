@@ -1,0 +1,4 @@
+# The python3.12 Lambda runtime already ships boto3/botocore, so nothing is
+# vendored into the deployment package. This file exists so the CI dependency
+# scanning step (pip-audit) has a manifest to audit, and keeps working the
+# moment a real third-party dependency is added.
