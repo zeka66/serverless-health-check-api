@@ -1,7 +1,5 @@
 name: Deploy
 
-# Pull requests get validation, scanning and a plan, but never an apply.
-# Pushes to main deploy staging, then prod.
 on:
   push:
     branches: [main]
@@ -9,8 +7,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Least privilege at the workflow level. id-token is what allows the OIDC
-# exchange with AWS; no long-lived AWS credentials exist in this repository.
 permissions:
   contents: read
 
@@ -24,12 +20,6 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION }}
 
 jobs:
-  # ---------------------------------------------------------------------
-  # [sec] IaC Security + dependency scanning. This job is issued NO AWS
-  # credentials at all, so a pull request from a fork has nothing to steal.
-  # Every deploy job declares `needs: validate`, which makes this a hard
-  # gate before any terraform apply.
-  # ---------------------------------------------------------------------
   validate:
     name: Validate and scan
     runs-on: ubuntu-latest
@@ -45,8 +35,6 @@ jobs:
         run: terraform fmt -check -recursive
 
       - name: Terraform validate
-        # -backend=false validates syntax and wiring without needing
-        # credentials or reaching out to S3.
         run: |
           terraform init -backend=false
           terraform validate
@@ -65,11 +53,9 @@ jobs:
       - name: Lambda unit tests
         run: pytest tests/ -v
 
-      # [sec] Dependency scanning for the Lambda.
       - name: Dependency scan (pip-audit)
         run: pip-audit --requirement src/requirements.txt --strict --progress-spinner off
 
-      # [sec] IaC security scan. Exits non-zero on any finding.
       - name: IaC security scan (Checkov)
         run: |
           checkov --directory . \
@@ -87,9 +73,6 @@ jobs:
           path: checkov.sarif
           if-no-files-found: ignore
 
-  # ---------------------------------------------------------------------
-  # Plan on pull requests, so reviewers see the diff before merge.
-  # ---------------------------------------------------------------------
   plan:
     name: Plan (staging)
     if: github.event_name == 'pull_request'
@@ -102,6 +85,22 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Debug OIDC claims
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+        run: |
+          response=$(curl -sSf \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com")
+
+          token=$(echo "$response" | jq -r '.value')
+
+          echo "$token" |
+            cut -d '.' -f2 |
+            base64 -d 2>/dev/null |
+            jq '{sub, aud}'
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -135,9 +134,6 @@ jobs:
               body: '### Terraform plan (staging)\n```hcl\n' + truncated + '\n```'
             });
 
-  # ---------------------------------------------------------------------
-  # Staging deploys automatically once main is green.
-  # ---------------------------------------------------------------------
   deploy-staging:
     name: Deploy staging
     if: github.event_name != 'pull_request'
@@ -154,8 +150,6 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          # The role's trust policy is scoped to this repo AND the staging
-          # environment, so this job physically cannot assume the prod role.
           role-to-assume: ${{ vars.AWS_ROLE_ARN_STAGING }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: gha-deploy-staging-${{ github.run_id }}
@@ -175,8 +169,6 @@ jobs:
         id: outputs
         run: echo "endpoint=$(terraform output -raw health_endpoint)" >> "$GITHUB_OUTPUT"
 
-      # Post-deploy verification: proves the endpoint works and that input
-      # validation rejects a bad request, before prod is attempted.
       - name: Smoke test
         run: |
           ENDPOINT=$(terraform output -raw health_endpoint)
@@ -194,9 +186,6 @@ jobs:
           echo "  -> $code $(cat /tmp/bad.json)"
           [ "$code" = "400" ] || { echo "Validation test failed"; exit 1; }
 
-  # ---------------------------------------------------------------------
-  # Prod deploys only after staging has deployed and smoke-tested cleanly.
-  # ---------------------------------------------------------------------
   deploy-prod:
     name: Deploy prod
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
