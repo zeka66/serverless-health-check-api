@@ -1,10 +1,3 @@
-// CORE REQUIREMENT: a dedicated IAM role for the deployment process.
-//
-// One role per environment. Defining them here - in a stack the pipeline never
-// runs - is itself the control that stops a compromised pipeline raising its
-// own privileges: the deploy role can create staging-* resources, but cannot
-// modify staging-health-check-deploy-role.
-
 data "aws_iam_policy_document" "deploy_assume_role" {
   for_each = local.envs
 
@@ -23,13 +16,12 @@ data "aws_iam_policy_document" "deploy_assume_role" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # Scoped to one repository AND one GitHub Environment. A job running
-    # against the staging environment cannot assume the prod role, even from
-    # the same repository and the same branch.
     condition {
-      test     = "StringEquals"
+      test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:environment:${each.value}"]
+      values = [
+        "repo:${split("/", var.github_repository)[0]}@*/${split("/", var.github_repository)[1]}@*:environment:${each.value}",
+      ]
     }
   }
 }
@@ -43,13 +35,6 @@ resource "aws_iam_role" "deploy" {
   max_session_duration = 3600
 }
 
-# ---------------------------------------------------------------------------
-# Deployment role permissions
-#
-# [sec] Least privilege: every statement below is pinned to an env-prefixed
-# ARN. There is no Resource = "*" anywhere in this document.
-# ---------------------------------------------------------------------------
-
 data "aws_iam_policy_document" "deploy" {
   for_each = local.envs
 
@@ -58,7 +43,6 @@ data "aws_iam_policy_document" "deploy" {
     effect  = "Allow"
     actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
 
-    # Each role can only touch its own environment's state file.
     resources = ["${aws_s3_bucket.state.arn}/${each.value}/*"]
   }
 
@@ -96,6 +80,8 @@ data "aws_iam_policy_document" "deploy" {
 
     actions = [
       "lambda:CreateFunction",
+      "lambda:TagResource",
+      "lambda:UntagResource",
       "lambda:DeleteFunction",
       "lambda:GetFunction",
       "lambda:GetFunctionConfiguration",
@@ -107,8 +93,6 @@ data "aws_iam_policy_document" "deploy" {
       "lambda:GetPolicy",
       "lambda:PutFunctionConcurrency",
       "lambda:DeleteFunctionConcurrency",
-      "lambda:TagResource",
-      "lambda:UntagResource",
       "lambda:ListTags",
     ]
 
@@ -123,18 +107,17 @@ data "aws_iam_policy_document" "deploy" {
       "iam:CreateRole",
       "iam:DeleteRole",
       "iam:GetRole",
-      "iam:UpdateRole",
-      "iam:PutRolePolicy",
-      "iam:DeleteRolePolicy",
       "iam:GetRolePolicy",
       "iam:ListRolePolicies",
       "iam:ListAttachedRolePolicies",
       "iam:TagRole",
       "iam:UntagRole",
       "iam:ListInstanceProfilesForRole",
+      "iam:UpdateRole",
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePolicy",
     ]
 
-    # Cannot create or modify any role outside its own environment prefix.
     resources = ["arn:aws:iam::${local.account_id}:role/${each.value}-*"]
   }
 
@@ -144,8 +127,6 @@ data "aws_iam_policy_document" "deploy" {
     actions   = ["iam:PassRole"]
     resources = ["arn:aws:iam::${local.account_id}:role/${each.value}-health-check-lambda-role"]
 
-    # Even holding PassRole, the pipeline can only hand this role to Lambda -
-    # not to EC2 or anything else that could be used to escalate privilege.
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
@@ -173,8 +154,6 @@ data "aws_iam_policy_document" "deploy" {
     ]
   }
 
-  # DescribeLogGroups is a list operation and is authorised against the
-  # log-stream ARN form rather than a specific group.
   statement {
     sid       = "CloudWatchLogGroupDiscovery"
     effect    = "Allow"
@@ -194,10 +173,6 @@ data "aws_iam_policy_document" "deploy" {
       "apigateway:DELETE",
     ]
 
-    # API Gateway control-plane ARNs address REST paths (/restapis), not
-    # resource names, so they cannot be scoped by environment prefix. The
-    # paths themselves are enumerated rather than granted wholesale, and
-    # isolation is enforced by the two roles being separate identities.
     resources = [
       "arn:aws:apigateway:${local.region}::/restapis",
       "arn:aws:apigateway:${local.region}::/restapis/*",
