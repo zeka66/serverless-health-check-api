@@ -1,10 +1,9 @@
 variable "table_name" {
-  description = "Name of the DynamoDB table (already env-prefixed)."
-  type        = string
+  type = string
 }
 
 variable "deletion_protection_enabled" {
-  description = "Block accidental table deletion. Enabled for prod only."
+  description = "Block table deletion. Enabled for PROD."
   type        = bool
   default     = false
 }
