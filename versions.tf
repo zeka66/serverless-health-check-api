@@ -1,6 +1,4 @@
 terraform {
-  # >= 1.10 is required for native S3 state locking (use_lockfile), which
-  # removes the need for a separate DynamoDB lock table.
   required_version = ">= 1.10.0"
 
   required_providers {
@@ -16,10 +14,7 @@ terraform {
 }
 
 provider "aws" {
-  region = var.aws_region
-
-  # Refuse to operate against any account not listed. Guards against a wrong
-  # AWS_PROFILE on a machine that also has work credentials configured.
+  region              = var.aws_region
   allowed_account_ids = var.allowed_account_ids
 
   default_tags {
