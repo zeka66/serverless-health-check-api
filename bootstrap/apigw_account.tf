@@ -1,9 +1,3 @@
-// API Gateway REST requires one account-wide IAM role to write access logs.
-//
-// It lives in the bootstrap rather than the per-environment stack because it
-// is a global setting: if staging and prod both managed it, each apply would
-// overwrite the other's copy.
-
 data "aws_iam_policy_document" "apigw_cloudwatch_assume" {
   statement {
     effect  = "Allow"

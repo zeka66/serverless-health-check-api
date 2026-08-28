@@ -8,8 +8,6 @@ terraform {
     }
   }
 
-  # Deliberately no backend block: this stack creates the state backend, so it
-  # keeps local state.
 }
 
 provider "aws" {
