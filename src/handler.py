@@ -1,11 +1,6 @@
-"""Health check Lambda.
-
-Invoked by API Gateway on /health. Requirements from the brief:
-  1. Log the incoming request event to CloudWatch.
-  2. Validate that the JSON body contains a top-level ``payload`` key,
-     returning 400 if it does not.
-  3. Generate a unique ID and save the request to DynamoDB.
-  4. Return 200 with a JSON body.
+"""Health check handler.
+Logs the incoming event, requires a 'payload' key in the JSON body (400 if
+missing), stores the request under a generated UUID, returns 200.
 """
 
 from __future__ import annotations
@@ -26,10 +21,7 @@ logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
 TABLE_NAME = os.environ["TABLE_NAME"]
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "unknown")
-# Items self-expire so an append-only request log cannot grow without bound.
 TTL_DAYS = int(os.environ.get("TTL_DAYS", "30"))
-
-# Created at module scope so the connection is reused across warm invocations.
 _TABLE = boto3.resource("dynamodb").Table(TABLE_NAME)
 
 
@@ -69,7 +61,6 @@ def _decode_body(event: Dict[str, Any]) -> str:
 def _parse_and_validate(event: Dict[str, Any]) -> Dict[str, Any]:
     raw = _decode_body(event)
 
-    # API Gateway always hands us a string; tolerate a dict for direct invokes.
     if isinstance(raw, dict):
         body = raw
     else:
@@ -102,8 +93,6 @@ def _build_item(event: Dict[str, Any], body: Dict[str, Any], request_id: str) ->
         "path": ctx.get("path") or event.get("path"),
         "source_ip": identity.get("sourceIp"),
         "user_agent": identity.get("userAgent"),
-        # Stored as a JSON string: DynamoDB rejects native floats, and this
-        # keeps arbitrary caller structures round-trippable without coercion.
         "payload": json.dumps(body["payload"], default=str),
     }
 
@@ -116,7 +105,6 @@ def _build_item(event: Dict[str, Any], body: Dict[str, Any], request_id: str) ->
 def handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
     request_id = getattr(context, "aws_request_id", "local")
 
-    # Requirement 1: log the incoming request event to CloudWatch.
     logger.info("Incoming request event: %s", json.dumps(event, default=str))
 
     try:
@@ -127,9 +115,7 @@ def handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
 
     item = _build_item(event, body, request_id)
 
-    # Requirement 2: persist the request under a generated unique ID.
     _TABLE.put_item(Item=item)
     logger.info("Stored request as item id=%s", item["id"])
 
-    # Requirement 3: respond to API Gateway.
     return _response(200, {"status": "healthy", "message": "Request processed and saved."})
